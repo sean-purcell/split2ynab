@@ -1,0 +1,22 @@
+{
+  "name": "split2ynab",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "eslint": "^7.20.0",
+    "eslint-config-airbnb-base": "^14.2.1",
+    "eslint-plugin-import": "^2.22.1"
+  },
+  "dependencies": {
+    "nconf": "^0.11.2",
+    "node-zookeeper-client": "^1.1.0",
+    "splitwise": "^1.0.0",
+    "ynab": "^1.21.0"
+  }
+}
