@@ -47,6 +47,39 @@ async function getValue(zoo, path) {
   });
 }
 
+async function setValue(zoo, path, data) {
+  return new Promise((resolve, reject) => {
+    zoo.setData(path, data, (error) => {
+      if (error) { reject(error); } else { resolve(); }
+    });
+  });
+}
+
+const txnSplitwiseToYnab = (account_id, split_uid, txn) => {
+  const user = txn.users.find((user) => user.user_id == split_uid);
+  if (!user) {
+    return null;
+  }
+
+  const owing = Math.round(Number(user.net_balance) * 1000);
+
+  const result = {
+    date: txn.date,
+    amount: owing,
+    cleared: 'uncleared',
+    approved: false,
+    account_id,
+    import_id: `split2ynab:${txn.id}`,
+    memo: txn.description,
+  };
+  const { first_name, last_name, id } = txn.created_by;
+  if (id != split_uid) {
+    result.payee = `${first_name} ${last_name}`;
+  }
+
+  return result;
+};
+
 const getYnabAccount = async (ynab) => {
   const { budgetName, accountName } = (() => {
     const { budget, account } = nconf.get('ynab');
@@ -101,16 +134,58 @@ const main = async () => {
   const swUser = await sw.getCurrentUser();
   console.log('splitwise user: %o', swUser);
 
-  const expenses = await sw.getExpenses({
-    dated_after: startDate,
-    limit: 0,
-  });
-  console.log('expenses:\n%o', expenses);
+  const query = (() => {
+    if (latest_update) {
+      return {
+        dated_after: startDate,
+        updated_after: latest_update,
+        limit: 0,
+      };
+    }
+
+    return {
+      dated_after: startDate,
+      limit: 0,
+    };
+  })();
+  const txns = await sw.getExpenses(query);
+  console.log('txns:\n%o', txns);
 
   const { budget, account } = await getYnabAccount(ynab);
+  console.log('budget: %o, account: %o', budget, account);
+
+  const exampleTxns = await ynab.transactions.getTransactionsByAccount(budget, account);
+  console.log('examples:\n%o', exampleTxns);
+
+  let ynabTxns = txns.map(
+    (txn) => ({ updated_at: txn.updated_at, ynab: txnSplitwiseToYnab(account, swUser.id, txn) }),
+  ).filter((x) => x.ynab).sort((a, b) => a.updated_at < b.updated_at);
+
+  const limit = nconf.get('limit');
+  if (limit !== undefined) {
+    ynabTxns = ynabTxns.slice(0, limit);
+  }
+
+  console.log('ynab txns:\n%o', ynabTxns);
+
+  transactionsToSend = ynabTxns.map((t) => t.ynab);
+
+  if (transactionsToSend.length) {
+    await ynab.transactions.updateTransactions(budget,
+      { transactions: transactionsToSend });
+
+    const max_updated_at = Math.max(...(ynabTxns.map((t) => t.updated_at)));
+    console.log(`max updated at: ${max_updated_at}`);
+
+    if (nconf.get('writeback')) {
+      await setValue(zoo, LATEST_UPDATE, max_updated_at);
+    }
+  } else {
+    console.log('nothing to send');
+  }
 };
 
 main().then(() => process.exit(0)).catch((e) => {
-  console.log(`Error: ${e}`);
+  console.log('Error: %o', e);
   process.exit(1);
 });
