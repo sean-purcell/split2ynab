@@ -16,7 +16,7 @@
   "dependencies": {
     "nconf": "^0.11.2",
     "node-zookeeper-client": "^1.1.0",
-    "splitwise": "^1.0.0",
+    "splitwise": "github:iburinoc/splitwise",
     "ynab": "^1.21.0"
   }
 }
