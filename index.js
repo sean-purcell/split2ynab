@@ -148,18 +148,31 @@ const main = async () => {
       limit: 0,
     };
   })();
-  const txns = await sw.getExpenses(query);
+  const txns = (await sw.getExpenses(query)).filter((t) => t.updated_at > latest_update);
   console.log('txns:\n%o', txns);
 
   const { budget, account } = await getYnabAccount(ynab);
   console.log('budget: %o, account: %o', budget, account);
 
-  const exampleTxns = await ynab.transactions.getTransactionsByAccount(budget, account);
-  console.log('examples:\n%o', exampleTxns);
-
   let ynabTxns = txns.map(
     (txn) => ({ updated_at: txn.updated_at, ynab: txnSplitwiseToYnab(account, swUser.id, txn) }),
-  ).filter((x) => x.ynab).sort((a, b) => a.updated_at < b.updated_at);
+  ).filter((x) => x.ynab).sort((a, b) => {
+    if (a.updated_at < b.updated_at) {
+      return -1;
+    } if (a.updated_at < b.updated_at) {
+      return 1;
+    }
+    return 0;
+  });
+
+  const existingTransactions = (await ynab.transactions.getTransactionsByAccount(budget, account)).data.transactions;
+  const existingImportIds = new Set(
+    existingTransactions.map((t) => t.import_id),
+  );
+
+  console.log('example transactions:\n%o', existingTransactions);
+
+  console.log('unlimited ynab txns:\n%o', ynabTxns);
 
   const limit = nconf.get('limit');
   if (limit !== undefined) {
@@ -170,15 +183,34 @@ const main = async () => {
 
   transactionsToSend = ynabTxns.map((t) => t.ynab);
 
-  if (transactionsToSend.length) {
-    await ynab.transactions.updateTransactions(budget,
-      { transactions: transactionsToSend });
+  if (transactionsToSend.length && !nconf.get('nowrite')) {
+    const updates = transactionsToSend.filter((x) => existingImportIds.has(x.import_id));
+    const creates = transactionsToSend.filter((x) => !existingImportIds.has(x.import_id));
 
-    const max_updated_at = Math.max(...(ynabTxns.map((t) => t.updated_at)));
+    console.log('updates:\n%o', updates);
+
+    if (updates.length) {
+      await ynab.transactions.updateTransactions(budget,
+        { transactions: updates });
+    }
+
+    console.log('creates:\n%o', creates);
+    if (creates.length) {
+      await ynab.transactions.createTransactions(budget,
+        { transactions: creates });
+    }
+
+    const max_updated_at = ynabTxns.map((t) => t.updated_at)
+      .reduce((acc, val) => {
+        if (acc > val) {
+          return acc;
+        }
+        return val;
+      });
     console.log(`max updated at: ${max_updated_at}`);
 
     if (nconf.get('writeback')) {
-      await setValue(zoo, LATEST_UPDATE, max_updated_at);
+      await setValue(zoo, LATEST_UPDATE, Buffer.from(max_updated_at));
     }
   } else {
     console.log('nothing to send');
