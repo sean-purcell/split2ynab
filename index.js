@@ -215,9 +215,24 @@ const main = async () => {
   } else {
     console.log('nothing to send');
   }
+
+  zoo.close();
 };
 
-main().then(() => process.exit(0)).catch((e) => {
+(async () => {
+  if (nconf.get('loop') && nconf.get('delay')) {
+    while (true) {
+      try {
+        await main();
+      } catch (error) {
+        console.log('failed: %o', error);
+      }
+      await new Promise((r) => setTimeout(r, nconf.get('delay')));
+    }
+  } else {
+    await main();
+  }
+})().then(() => process.exit(0)).catch((e) => {
   console.log('Error: %o', e);
   process.exit(1);
 });
