@@ -9,4 +9,6 @@ ENV LOOP=1
 ENV DELAY=60000
 ENV WRITEBACK=1
 
+ADD index.js /app/
+
 CMD ["node", "index.js"]
