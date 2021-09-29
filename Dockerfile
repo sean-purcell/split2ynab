@@ -6,7 +6,7 @@ ADD package.json package-lock.json /app/
 RUN npm ci
 
 ENV LOOP=1
-ENV DELAY=60000
+ENV DELAY=300000
 ENV WRITEBACK=1
 
 ADD index.js /app/

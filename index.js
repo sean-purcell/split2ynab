@@ -1,4 +1,5 @@
 /* eslint-disable no-unused-vars */
+const { timeout } = require('promise-timeout');
 const Splitwise = require('splitwise');
 const ynabApi = require('ynab');
 const zookeeper = require('node-zookeeper-client');
@@ -148,8 +149,14 @@ const main = async () => {
       limit: 0,
     };
   })();
-  const txns = (await sw.getExpenses(query)).filter((t) => t.updated_at > latest_update);
-  console.log('txns:\n%o', txns);
+  const expenses = await timeout(sw.getExpenses(query), 5000);
+  const txns = expenses.filter((t) => t.updated_at > latest_update);
+
+  const debug = nconf.get('debug');
+
+  if (debug) {
+    console.log('txns:\n%o', txns);
+  }
 
   const { budget, account } = await getYnabAccount(ynab);
   console.log('budget: %o, account: %o', budget, account);
@@ -170,16 +177,22 @@ const main = async () => {
     existingTransactions.map((t) => t.import_id),
   );
 
-  console.log('example transactions:\n%o', existingTransactions);
+  if (debug) {
+    console.log('example transactions:\n%o', existingTransactions);
+  }
 
-  console.log('unlimited ynab txns:\n%o', ynabTxns);
+  if (debug) {
+    console.log('unlimited ynab txns:\n%o', ynabTxns);
+  }
 
   const limit = nconf.get('limit');
   if (limit !== undefined) {
     ynabTxns = ynabTxns.slice(0, limit);
   }
 
-  console.log('ynab txns:\n%o', ynabTxns);
+  if (debug) {
+    console.log('ynab txns:\n%o', ynabTxns);
+  }
 
   transactionsToSend = ynabTxns.map((t) => t.ynab);
 
