@@ -3,7 +3,7 @@ FROM node:14.16
 WORKDIR /app
 ADD package.json package-lock.json /app/
 
-RUN npm ci
+RUN npm ci --verbose
 
 ENV LOOP=1
 ENV DELAY=300000

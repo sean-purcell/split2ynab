@@ -2,59 +2,14 @@
 const { timeout } = require('promise-timeout');
 const Splitwise = require('splitwise');
 const ynabApi = require('ynab');
-const zookeeper = require('node-zookeeper-client');
+const sqlite = require('sqlite-async');
 const nconf = require('nconf');
-
-const LATEST_UPDATE = '/latest_update';
 
 nconf.argv().env({
   separator: '__',
   lowerCase: true,
   parseValues: true,
 });
-
-async function zookeeperClient(zooconf) {
-  const client = zookeeper.createClient(zooconf.connect);
-
-  const zoo = await new Promise((resolve, reject) => {
-    client.once('connected', () => {
-      console.log('connected to Zookeeper');
-      resolve(client);
-    });
-
-    client.connect();
-  });
-
-  return zoo;
-}
-
-async function ensureExists(zoo, path) {
-  return new Promise((resolve, reject) => {
-    zoo.create(path, (error) => {
-      if (error) {
-        if (error.getCode() == zookeeper.Exception.NODE_EXISTS) {
-          resolve();
-        } else { reject(error); }
-      } else { resolve(); }
-    });
-  });
-}
-
-async function getValue(zoo, path) {
-  return new Promise((resolve, reject) => {
-    zoo.getData(path, (error, data) => {
-      if (error) { reject(error); } else { resolve(data); }
-    });
-  });
-}
-
-async function setValue(zoo, path, data) {
-  return new Promise((resolve, reject) => {
-    zoo.setData(path, data, (error) => {
-      if (error) { reject(error); } else { resolve(); }
-    });
-  });
-}
 
 const txnSplitwiseToYnab = (account_id, split_uid, txn) => {
   const user = txn.users.find((user) => user.user_id == split_uid);
@@ -70,7 +25,7 @@ const txnSplitwiseToYnab = (account_id, split_uid, txn) => {
     cleared: 'uncleared',
     approved: false,
     account_id,
-    import_id: `split2ynab:${txn.id}`,
+    import_id: `split2ynab.v2:${txn.id}`,
     memo: txn.description,
   };
   const { first_name, last_name, id } = txn.created_by;
@@ -81,9 +36,23 @@ const txnSplitwiseToYnab = (account_id, split_uid, txn) => {
   return result;
 };
 
+const getDb = async () => {
+  console.log('opening database');
+  const db = await sqlite.open(nconf.get('db'));
+  console.log('creating table');
+  await db.run(`CREATE TABLE IF NOT EXISTS expenses (
+    id TEXT NOT NULL PRIMARY KEY,
+    updated DATETIME NOT NULL
+    )
+  `);
+  await db.run('CREATE INDEX IF NOT EXISTS expenses_updated ON expenses (updated)');
+  console.log('created table');
+  return db;
+};
+
 const getYnabAccount = async (ynab) => {
   const { budgetName, accountName } = (() => {
-    const { budget, account } = nconf.get('ynab');
+    const { key, budget, account } = nconf.get('ynab');
     return { budgetName: budget, accountName: account };
   })();
   const { budgets } = (await ynab.budgets.getBudgets()).data;
@@ -102,29 +71,13 @@ const getYnabAccount = async (ynab) => {
 };
 
 const main = async () => {
-  const zooconf = nconf.get('zoo');
-  console.log('zookeeper config: %o', zooconf);
+  const ynabApiKey = nconf.get('ynab_api_key');
+  const splitwiseApiKey = nconf.get('splitwise_api_key');
 
-  const zoo = await zookeeperClient(zooconf);
-
-  await ensureExists(zoo, LATEST_UPDATE);
-  const latest_update = await getValue(zoo, LATEST_UPDATE);
-
-  const startDate = await (async () => {
-    const startDate = nconf.get('start_date');
-    if (startDate) {
-      return startDate;
-    }
-
-    return await getValue(zoo, '/start_date');
-  })();
-  const splitwiseApiKey = await getValue(zoo, '/splitwise/api_key');
-  const ynabApiKey = await getValue(zoo, '/ynab/api_key');
+  const startDate = nconf.get('start_date');
 
   console.log(`split api key: ${splitwiseApiKey}`);
   console.log(`ynab api key: ${ynabApiKey}`);
-
-  console.log(`latest update: ${latest_update}`);
 
   const sw = Splitwise({
     logger: console.log, apiKey: splitwiseApiKey,
@@ -135,6 +88,20 @@ const main = async () => {
   const swUser = await sw.getCurrentUser();
   console.log('splitwise user: %o', swUser);
 
+  const db = await getDb();
+
+  const latest_update = await (async () => {
+    const result = await db.get('SELECT updated FROM expenses ORDER BY updated DESC LIMIT 1');
+    console.log(`newest write: ${result}`);
+    if (result) {
+      return result.updated;
+    }
+    return undefined;
+  })();
+
+  console.log(`latest update: ${latest_update}`);
+
+  const debug = nconf.get('debug');
   const query = (() => {
     if (latest_update) {
       return {
@@ -149,10 +116,10 @@ const main = async () => {
       limit: 0,
     };
   })();
+  console.log('query:\n%o', query);
   const expenses = await timeout(sw.getExpenses(query), 5000);
-  const txns = expenses.filter((t) => t.updated_at > latest_update);
 
-  const debug = nconf.get('debug');
+  const txns = expenses.filter((t) => !latest_update || t.updated_at > latest_update);
 
   if (debug) {
     console.log('txns:\n%o', txns);
@@ -172,18 +139,10 @@ const main = async () => {
     return 0;
   });
 
-  const existingTransactions = (await ynab.transactions.getTransactionsByAccount(budget, account)).data.transactions;
-  const existingImportIds = new Set(
-    existingTransactions.map((t) => t.import_id),
-  );
-
-  if (debug) {
-    console.log('example transactions:\n%o', existingTransactions);
-  }
-
-  if (debug) {
-    console.log('unlimited ynab txns:\n%o', ynabTxns);
-  }
+  const existingIds = await (async () => {
+    const rows = await db.all('SELECT id FROM expenses');
+    return new Set(rows.map((row) => row.id));
+  })();
 
   const limit = nconf.get('limit');
   if (limit !== undefined) {
@@ -197,8 +156,8 @@ const main = async () => {
   transactionsToSend = ynabTxns.map((t) => t.ynab);
 
   if (transactionsToSend.length && !nconf.get('nowrite')) {
-    const updates = transactionsToSend.filter((x) => existingImportIds.has(x.import_id));
-    const creates = transactionsToSend.filter((x) => !existingImportIds.has(x.import_id));
+    const updates = transactionsToSend.filter((x) => existingIds.has(x.import_id));
+    const creates = transactionsToSend.filter((x) => !existingIds.has(x.import_id));
 
     console.log('updates:\n%o', updates);
 
@@ -213,23 +172,17 @@ const main = async () => {
         { transactions: creates });
     }
 
-    const max_updated_at = ynabTxns.map((t) => t.updated_at)
-      .reduce((acc, val) => {
-        if (acc > val) {
-          return acc;
-        }
-        return val;
-      });
-    console.log(`max updated at: ${max_updated_at}`);
-
-    if (nconf.get('writeback')) {
-      await setValue(zoo, LATEST_UPDATE, Buffer.from(max_updated_at));
+    for (const { ynab, updated_at } of ynabTxns) {
+      await db.run(`INSERT INTO expenses
+        VALUES(?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          updated=excluded.updated`, [ynab.import_id, updated_at]);
+      console.log(`inserted: ${ynab.import_id}, ${updated_at}`);
     }
   } else {
     console.log('nothing to send');
   }
-
-  zoo.close();
+  await db.close();
 };
 
 (async () => {
