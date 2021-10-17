@@ -4,6 +4,7 @@ const Splitwise = require('splitwise');
 const ynabApi = require('ynab');
 const sqlite = require('sqlite-async');
 const nconf = require('nconf');
+const printf = require('printf');
 
 nconf.argv().env({
   separator: '__',
@@ -70,7 +71,7 @@ const getYnabAccount = async (ynab) => {
   return { budget: budget.id, account: account.id };
 };
 
-const main = async () => {
+const importTransactions = async () => {
   const ynabApiKey = nconf.get('ynab_api_key');
   const splitwiseApiKey = nconf.get('splitwise_api_key');
 
@@ -183,6 +184,45 @@ const main = async () => {
     console.log('nothing to send');
   }
   await db.close();
+};
+
+const budgetIntoCreditCards = async () => {
+  const ynabApiKey = nconf.get('ynab_api_key');
+  const ynab = new ynabApi.API(ynabApiKey);
+
+  const { budget, account } = await getYnabAccount(ynab);
+
+  const now = new Date();
+  const iso_month = printf('%04d-%02d-01', now.getFullYear(), now.getMonth() + 1);
+
+  const { accounts } = (await ynab.accounts.getAccounts(budget)).data;
+  const { category_groups } = (await ynab.categories.getCategories(budget)).data;
+
+  const creditCardCategories = category_groups
+    .find((c) => c.name == 'Credit Card Payments')
+    .categories;
+  for (const category of creditCardCategories) {
+    const account = accounts.find((a) => a.name == category.name);
+    const needed_balance = -account.balance;
+    const budgeted_balance = category.balance;
+    const diff = needed_balance - budgeted_balance;
+    const new_budgeted = category.budgeted + diff;
+    console.log(`Credit card: ${category.name}, needed: ${needed_balance}, available: ${budgeted_balance}, new budgeted: ${new_budgeted}`);
+    if (diff != 0) {
+      const result = await ynab.categories.updateMonthCategory(budget, iso_month, category.id,
+        { category: { budgeted: new_budgeted } });
+      console.log(`Updated ${category.name} to ${new_budgeted} for ${iso_month}, result: %o`, result);
+    } else {
+      console.log(`No action necessary for ${category.name}`);
+    }
+  }
+};
+
+const main = async () => {
+  await importTransactions();
+  if (nconf.get('budget_ccs')) {
+    await budgetIntoCreditCards();
+  }
 };
 
 (async () => {
